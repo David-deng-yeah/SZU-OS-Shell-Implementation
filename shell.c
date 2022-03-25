@@ -1,14 +1,15 @@
 #include<stdio.h>
 #include<string.h>
 #include<ctype.h>
-
-#include"anime.h"
-
 #include<stdlib.h>
 #include<sys/types.h>
 #include<sys/wait.h>
+#include<sys/stat.h>
+#include<fcntl.h>
 #include<unistd.h>
 #include<stdarg.h>
+
+#include"anime.h"
 
 #define BUFFER_SIZE 100// buffer size
 #define MAX_CMD 10// max num of command
@@ -28,7 +29,7 @@ void inputParse(char buffer[]);
 void conduct_cmd(int argc, char* argv[]);
 int conduct_cd();
 void conduct_pipe(char buffer[BUFFER_SIZE]);
-//void output_redirect(char buffer[BUFFER_SIZE]);
+void output_redirect(char buffer[BUFFER_SIZE]);
 
 int main()
 {
@@ -102,6 +103,15 @@ void inputParse(char buffer[]){
 
 void conduct_cmd(int argc, char* argv[]){
     /*these cmd is internal command*/
+
+    for(int i=0; i<MAX_CMD; i++){
+        if(strcmp(command[i], ">") == 0){
+            strcpy(buffer, bufferCopy);
+            output_redirect(buffer);
+            return;
+        }
+    }
+
     for(int i=0; i<MAX_CMD; i++){
         if(strcmp(command[i], "|") == 0){
             strcpy(buffer, bufferCopy);
@@ -200,5 +210,70 @@ void conduct_pipe(char buffer[BUFFER_SIZE]){
         execvp(argv[0], argv);
         if(pd[0] != STDIN_FILENO)
             close(pd[0]);
+    }
+}
+
+void output_redirect(char buffer[BUFFER_SIZE]){
+    /*outfile*/
+    char outputFile[BUFFER_SIZE];
+    memset(outputFile, 0x00, BUFFER_SIZE);
+    /*check the format of the cmd*/
+    int num_redirect = 0;
+    for(int i=0; i+1 < strlen(buffer); i++){
+        if(buffer[i] == '>' && buffer[i+1] == ' ')
+            num_redirect++;
+    }
+    if(num_redirect != 1){
+        perror("redirect format error\n");
+        return;
+    }
+
+    for(int i=0; i<argc; i++){
+        if(strcmp(command[i], ">") == 0){
+            if(i+1 < argc){
+                strcpy(outputFile, command[i+1]);
+            }else{
+                perror("without outputfile!\n");
+                return;
+            }
+        }
+    }
+    /*split the cmd by ">*/
+    int idx = 0;
+    for(; idx < strlen(buffer); idx++){
+        if(buffer[idx] == '>') break;
+    }
+    buffer[idx-1] = '\0', buffer[idx] = '\0';
+    inputParse(buffer);
+    // printf("-------------argv-------------------\n");
+    // for(int i=0; i<MAX_CMD; i++){
+    //     if(argv[i] != NULL)
+    //        printf("%s\n", argv[i]);
+    // }
+    // printf("%s\n", outputFile);
+    pid_t pid = fork();
+    if(pid == -1){
+        perror("error!\n");
+        exit(1);
+    }else if(pid == 0){// child process
+        /*open file*/
+        int fd = open(outputFile, O_WRONLY|O_CREAT|O_TRUNC, 777);
+        if(fd < 0) exit(1);
+        /*conduct cmd*/
+        dup2(fd, STDOUT_FILENO);// use fd as std_output
+        execvp(argv[0], argv);
+        if(fd != STDOUT_FILENO)
+            close(fd);
+        //if this code running, that means the execvp get error
+        printf("child process execvp run error!\n");
+        exit(1);
+    }else{// parent process
+        /*parent process have to wait child process, since parent need child's output*/
+        int status;
+        waitpid(pid, &status, 0);      
+        int err = WEXITSTATUS(status); 
+        if (err) { 
+            printf("Error: %s\n", strerror(err));
+        }  
     }
 }

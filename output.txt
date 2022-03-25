@@ -1,0 +1,11 @@
+.
+..
+anime.h
+.git
+myShell
+myShell.c
+output.txt
+README.md
+requirement
+shell
+shell.c
