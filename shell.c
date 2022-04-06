@@ -30,6 +30,7 @@ void conduct_cmd(int argc, char* argv[]);
 int conduct_cd();
 void conduct_pipe(char buffer[BUFFER_SIZE]);
 void output_redirect(char buffer[BUFFER_SIZE]);
+void input_redirect(char buffer[BUFFER_SIZE]);
 
 int main()
 {
@@ -108,6 +109,14 @@ void conduct_cmd(int argc, char* argv[]){
         if(strcmp(command[i], ">") == 0){
             strcpy(buffer, bufferCopy);
             output_redirect(buffer);
+            return;
+        }
+    }
+
+    for(int i=0; i<MAX_CMD; i++){
+        if(strcmp(command[i], "<") == 0){
+            strcpy(buffer, bufferCopy);
+            input_redirect(buffer);
             return;
         }
     }
@@ -263,6 +272,66 @@ void output_redirect(char buffer[BUFFER_SIZE]){
         dup2(fd, STDOUT_FILENO);// use fd as std_output
         execvp(argv[0], argv);
         if(fd != STDOUT_FILENO)
+            close(fd);
+        //if this code running, that means the execvp get error
+        printf("child process execvp run error!\n");
+        exit(1);
+    }else{// parent process
+        /*parent process have to wait child process, since parent need child's output*/
+        int status;
+        waitpid(pid, &status, 0);      
+        int err = WEXITSTATUS(status); 
+        if (err) { 
+            printf("Error: %s\n", strerror(err));
+        }  
+    }
+}
+
+void input_redirect(char buffer[BUFFER_SIZE]){
+    /*inputfile*/
+    char inputFile[BUFFER_SIZE];
+    memset(inputFile, 0x00, BUFFER_SIZE);
+    /*check the format of cmd*/
+    int num_redirect = 0;
+    for(int i=0; i+1<strlen(buffer); i++){
+        if(buffer[i] == '<' && buffer[i+1] == ' ')
+            num_redirect++;
+    }
+    if(num_redirect != 1){
+        perror("redirect format error\n");
+        return;
+    }
+
+    for(int i=0; i<argc; i++){
+        if(strcmp(command[i], "<") == 0){
+            if(i+1 < argc){
+                strcpy(inputFile, command[i+1]);
+            }else{
+                perror("without inputfile!\n");
+                return;
+            }
+        }
+    }
+
+    int idx = 0;
+    for(; idx < strlen(buffer); idx++){
+        if(buffer[idx] == '<') break;
+    }
+    buffer[idx-1] = '\0', buffer[idx] = '\0';
+    inputParse(buffer);
+
+    pid_t pid = fork();
+    if(pid == -1){
+        perror("error!\n");
+        exit(1);
+    }else if(pid == 0){// child process
+        /*open file*/
+        int fd = open(inputFile, O_RDONLY, 7777);
+        if(fd < 0) exit(1);
+        /*conduct cmd*/
+        dup2(fd, STDIN_FILENO);// use fd as std_output
+        execvp(argv[0], argv);
+        if(fd != STDIN_FILENO)
             close(fd);
         //if this code running, that means the execvp get error
         printf("child process execvp run error!\n");
