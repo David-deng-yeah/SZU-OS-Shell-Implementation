@@ -12,6 +12,7 @@
 #define TRUE 1
 #define FALSE 0
 
+/*some symbol string*/
 const char* COMMAND_EXIT = "exit";
 const char* COMMAND_HELP = "help";
 const char* COMMAND_CD = "cd";
@@ -19,7 +20,7 @@ const char* COMMAND_IN = "<";
 const char* COMMAND_OUT = ">";
 const char* COMMAND_PIPE = "|";
 
-// 内置的状态码
+// enum the error type, so that we don't have to define it one by one
 enum {
 	RESULT_NORMAL,
 	ERROR_FORK,
@@ -31,16 +32,17 @@ enum {
 	ERROR_SYSTEM,
 	ERROR_EXIT,
 
-	/* 重定向的错误信息 */
+	/* error types about redirect*/
 	ERROR_MANY_IN,
 	ERROR_MANY_OUT,
 	ERROR_FILE_NOT_EXIST,
 	
-	/* 管道的错误信息 */
+	/* error types about pipe */
 	ERROR_PIPE,
 	ERROR_PIPE_MISS_PARAMETER
 };
 
+/*define curPath and commands as global variables*/
 char curPath[BUFFER_SIZE];
 char commands[BUFFER_SIZE][BUFFER_SIZE];
 
