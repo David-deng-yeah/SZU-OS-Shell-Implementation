@@ -1,348 +1,452 @@
-#include<stdio.h>
-#include<string.h>
-#include<ctype.h>
-#include<stdlib.h>
-#include<sys/types.h>
-#include<sys/wait.h>
-#include<sys/stat.h>
-#include<fcntl.h>
-#include<unistd.h>
-#include<stdarg.h>
+#include <stdio.h>
+#include <string.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <sys/wait.h>
+#include <sys/signal.h>
+#include <sys/types.h>
+#include <errno.h>
+#include <pwd.h>
 
-#include"anime.h"
+#define BUFFER_SIZE 256
+#define TRUE 1
+#define FALSE 0
 
-#define BUFFER_SIZE 100// buffer size
-#define MAX_CMD 10// max num of command
-#define MAX_CMD_LEN 100// max len of each command
+const char* COMMAND_EXIT = "exit";
+const char* COMMAND_HELP = "help";
+const char* COMMAND_CD = "cd";
+const char* COMMAND_IN = "<";
+const char* COMMAND_OUT = ">";
+const char* COMMAND_PIPE = "|";
 
-/*Global variables*/
-int argc = 0;// num of the parameters
-char* argv[MAX_CMD];// char* array of cmd, each char* pointer point the 2-D array command[][] 
-char command[MAX_CMD][MAX_CMD_LEN];// store the content of the cmd
-char buffer[BUFFER_SIZE];//act as a cache 
-char bufferCopy[BUFFER_SIZE];// copy of cache
+// 内置的状态码
+enum {
+	RESULT_NORMAL,
+	ERROR_FORK,
+	ERROR_COMMAND,
+	ERROR_WRONG_PARAMETER,
+	ERROR_MISS_PARAMETER,
+	ERROR_TOO_MANY_PARAMETER,
+	ERROR_CD,
+	ERROR_SYSTEM,
+	ERROR_EXIT,
 
-/*data process function*/
-int get_input(char buffer[]);
-void inputParse(char buffer[]);
-/*conduct function*/
-void conduct_cmd(int argc, char* argv[]);
-int conduct_cd();
-void conduct_pipe(char buffer[BUFFER_SIZE]);
-void output_redirect(char buffer[BUFFER_SIZE]);
-void input_redirect(char buffer[BUFFER_SIZE]);
+	/* 重定向的错误信息 */
+	ERROR_MANY_IN,
+	ERROR_MANY_OUT,
+	ERROR_FILE_NOT_EXIST,
+	
+	/* 管道的错误信息 */
+	ERROR_PIPE,
+	ERROR_PIPE_MISS_PARAMETER
+};
 
-int main()
-{
-    while(1){
-        printf("[Senjougahara]$ ");
-        if(get_input(buffer) == 0)
-            continue;
-        inputParse(buffer);
-        /*test case*/
-        // printf("content: %s\n", bufferCopy);
-        // printf("------------command----------------\n");
-        // for(int i=0; i<MAX_CMD; i++){
-        //     if(strlen(command[i]))
-        //         printf("%s\n", command[i]);
+char curPath[BUFFER_SIZE];
+char commands[BUFFER_SIZE][BUFFER_SIZE];
+
+int isCommandExist(const char* command);
+int getCurWorkDir();
+int splitCommands(char command[BUFFER_SIZE]);
+int conduct_Exit();
+int conduct_cmd(int commandNum);
+int conduct_help();
+int conduct_pipe(int left, int right);
+int conduct_redirect(int left, int right);
+int conduct_Cd(int commandNum);
+
+int main() {
+	/*get curWorkDir*/
+	if (ERROR_SYSTEM == getCurWorkDir()) {
+		fprintf(stderr, "\e[31;1mError: System error while getting current work directory.\n\e[0m");
+		exit(ERROR_SYSTEM);
+	}
+
+	/* begin the shell */
+	char inputBuffer[BUFFER_SIZE];
+	while (TRUE) {
+        printf("\e[32;1m[Senjougahara]:%s\e[0m$ ", curPath); 
+		/* input*/
+		fgets(inputBuffer, BUFFER_SIZE, stdin);
+		int len = strlen(inputBuffer);
+		if (len != BUFFER_SIZE) {
+			inputBuffer[len-1] = '\0';
+		}
+
+		int commandNum = splitCommands(inputBuffer);
+
+        /*test commands*/
+        // for(int i=0; i<commandNum; i++){
+        //     printf("%s\n", commands[i]);
         // }
-        // printf("-------------argv-------------------\n");
-        // for(int i=0; i<MAX_CMD; i++){
-        //     if(argv[i] != NULL)
-        //        printf("%s\n", argv[i]);
-        // }
-
-        /*now we have argc and argv, let's do sth interesting!*/
-        conduct_cmd(argc, argv);
-    }
-    return 0;
+		
+		if (commandNum != 0) {
+			/*internal cmd*/
+			if (strcmp(commands[0], COMMAND_EXIT) == 0) { //exit
+				if (ERROR_EXIT == conduct_Exit()) 
+					exit(-1);
+			} else if (strcmp(commands[0], COMMAND_CD) == 0) { // cd
+				switch (conduct_Cd(commandNum)) {
+					case ERROR_MISS_PARAMETER:
+						fprintf(stderr, "\e[31;1mError: Miss parameter while using command \"%s\".\n\e[0m", COMMAND_CD);
+						break;
+					case ERROR_WRONG_PARAMETER:
+						fprintf(stderr, "\e[31;1mError: No such path \"%s\".\n\e[0m", commands[1]);
+						break;
+					case ERROR_TOO_MANY_PARAMETER:
+						fprintf(stderr, "\e[31;1mError: Too many parameters while using command \"%s\".\n\e[0m", COMMAND_CD);
+						break;
+					case RESULT_NORMAL: 
+						if (ERROR_SYSTEM == getCurWorkDir()) {
+							fprintf(stderr, "\e[31;1mError: System error while getting current work directory.\n\e[0m");
+							exit(ERROR_SYSTEM);
+						} else break;
+				}
+			} else if (strcmp(commands[0], COMMAND_HELP) == 0){// help
+				conduct_help();
+			} else { // external cmd
+				switch (conduct_cmd(commandNum)) {
+					case ERROR_FORK:
+						fprintf(stderr, "\e[31;1mError: Fork error.\n\e[0m");
+						exit(ERROR_FORK);
+					case ERROR_COMMAND:
+						fprintf(stderr, "\e[31;1mError: Command not exist in myshell.\n\e[0m");
+						break;
+					case ERROR_MANY_IN:
+						fprintf(stderr, "\e[31;1mError: Too many redirection symbol \"%s\".\n\e[0m", COMMAND_IN);
+						break;
+					case ERROR_MANY_OUT:
+						fprintf(stderr, "\e[31;1mError: Too many redirection symbol \"%s\".\n\e[0m", COMMAND_OUT);
+						break;
+					case ERROR_FILE_NOT_EXIST:
+						fprintf(stderr, "\e[31;1mError: Input redirection file not exist.\n\e[0m");
+						break;
+					case ERROR_MISS_PARAMETER:
+						fprintf(stderr, "\e[31;1mError: Miss redirect file parameters.\n\e[0m");
+						break;
+					case ERROR_PIPE:
+						fprintf(stderr, "\e[31;1mError: Open pipe error.\n\e[0m");
+						break;
+					case ERROR_PIPE_MISS_PARAMETER:
+						fprintf(stderr, "\e[31;1mError: Miss pipe parameters.\n\e[0m");
+						break;
+				}
+			}
+		}
+	}
 }
 
-int get_input(char buffer[]){
-    memset(buffer, 0x00, BUFFER_SIZE);
-    fgets(buffer, BUFFER_SIZE, stdin);// read from terminal
-    buffer[strlen(buffer)-1] = 0x00;// remove the '/n' generate by fgets
-    /*make a copy of argv, since some element of buffer may become '\0'*/
-    strcpy(bufferCopy, buffer);
-    return strlen(buffer);
+/**
+ * @brief check whether the cmd exits or not by cmd "command -v xxx"
+ * 
+ * @param command const command buffer
+ * @return : int error type
+ */
+int isCommandExist(const char* command) { 
+	if (command == NULL || strlen(command) == 0) return FALSE;
+	int result = TRUE;
+    /*create pipe, fd[0]--read port, fd[1]--write port*/
+	int fd[2];
+	if (pipe(fd) == -1) {
+		result = FALSE;
+	} else {
+		/* deposit the STDIN and STDOUT, 
+        since we will use redirect skill in function */
+		int inFd = dup(STDIN_FILENO);
+		int outFd = dup(STDOUT_FILENO);
+
+		pid_t pid = vfork();
+		if (pid == -1) {
+			result = FALSE;
+		} else if (pid == 0) {
+			/*the output of next cmds will be put in fd[1]*/
+			close(fd[0]);
+			dup2(fd[1], STDOUT_FILENO);
+			close(fd[1]);
+
+			char tmp[BUFFER_SIZE];
+			sprintf(tmp, "command -v %s", command);// create string
+			system(tmp);
+			exit(1);
+		} else {
+			waitpid(pid, NULL, 0);
+			/* input of next cmds will be fd[0] */
+			close(fd[1]);
+			dup2(fd[0], STDIN_FILENO);
+			close(fd[0]);
+
+			if (getchar() == EOF) { // without data, which means commands is not exit
+				result = FALSE;
+			}
+			
+			/*restore stdin and stdout*/
+			dup2(inFd, STDIN_FILENO);
+			dup2(outFd, STDOUT_FILENO);
+		}
+	}
+
+	return result;
+}
+/**
+ * @brief Get the Cur Work Dir object, curPath will be filled
+ * 
+ * @return int error type
+ */
+int getCurWorkDir() {
+	if (getcwd(curPath, BUFFER_SIZE) == NULL)
+		return ERROR_SYSTEM;
+	else return RESULT_NORMAL;
 }
 
-void inputParse(char buffer[]){
-    /*initialize argc, argv and command*/
-    argc = 0;
-    for(int i=0; i<MAX_CMD; i++) 
-        argv[i] = NULL;
-    memset(command, '\0', sizeof(command));
-    int j = 0;
-
-    /*initialize command*/
-    for(int i=0; i<strlen(buffer); i++){
-        if(buffer[i] != ' '){
-            command[argc][j++] = buffer[i];
-        }else{
-            command[argc][j] = '\0';
-            ++argc, j=0;
-        }
-    }
-    if(j != 0) // make sure the end of each cmd is '\0'
-        command[argc][j] = '\0';
-
-    /*initialize argv*/
-    argc = 0;
-    int flag = 0;// trick for initalize argv
-    for (int i = 0; buffer[i] != '\0'; i++) {
-        if (flag == 0 && !isspace(buffer[i])) {
-            flag = 1;
-            argv[argc++] = buffer + i;
-        } else if (flag == 1 && isspace(buffer[i])) {
-            flag = 0;
-            buffer[i] = '\0';
-        }
-    }
-    argv[argc] = NULL;// because of argc++
+/**
+ * @brief split the command buffer into pieces by " ", 
+ * like "ls -a | grep sh" -> ["ls","-a","|","grep","sh"]
+ * 
+ * @param command command buffer
+ * @return int num of cmd pieces
+ * commands[i] end with '\0'
+ */
+int splitCommands(char command[BUFFER_SIZE]) { 
+	int num = 0;
+	int i, j;
+	for (i=0, j=0; i<strlen(command); i++) {
+		if (command[i] != ' ') {
+			commands[num][j++] = command[i];
+		} else {
+			if (j != 0) {
+				commands[num][j] = '\0';
+				++num;
+				j = 0;
+			}
+		}
+	}
+	if (j != 0) {
+		commands[num][j] = '\0';
+		++num;
+	}
+	return num;
 }
 
-void conduct_cmd(int argc, char* argv[]){
-    /*these cmd is internal command*/
-
-    for(int i=0; i<MAX_CMD; i++){
-        if(strcmp(command[i], ">") == 0){
-            strcpy(buffer, bufferCopy);
-            output_redirect(buffer);
-            return;
-        }
-    }
-
-    for(int i=0; i<MAX_CMD; i++){
-        if(strcmp(command[i], "<") == 0){
-            strcpy(buffer, bufferCopy);
-            input_redirect(buffer);
-            return;
-        }
-    }
-
-    for(int i=0; i<MAX_CMD; i++){
-        if(strcmp(command[i], "|") == 0){
-            strcpy(buffer, bufferCopy);
-            conduct_pipe(buffer);
-            return;
-        }
-    }
-
-    /*these cmd is external command*/
-    if(strcmp(command[0], "help") == 0){
-        printanime();
-    }else if(strcmp(command[0], "exit") == 0){
-        exit(0);
-    }else if(strcmp(command[0], "cd") == 0){
-        int res = conduct_cd();
-        if(res == 0)printf("cd faild\n");
-    }else{
-        pid_t pid = fork();
-        if(pid == -1){
-            printf("error!\n");
-        }else if(pid == 0){// child process
-            execvp(argv[0], argv);
-            //if this code running, that means the execvp get error
-            printf("child process execvp run error!\n");
-            exit(1);
-        }else{// parent process
-            //wait for the return of the child process
-            int status;
-            waitpid(pid, &status, 0);      
-            int err = WEXITSTATUS(status); 
-            if (err) { 
-                printf("Error: %s\n", strerror(err));
-            }  
-        }
-    }
-    
+/**
+ * @brief send terminal signal and exit the process
+ * 
+ * @return int error type
+ */
+int conduct_Exit() { 
+	pid_t pid = getpid();
+	if (kill(pid, SIGTERM) == -1) 
+		return ERROR_EXIT;
+	else return RESULT_NORMAL;
 }
 
-int conduct_cd(){
-    /*return 1 if success, else return 0*/
-    if(argc != 2){
-        return 0;
-    }else{
-        if(chdir(command[1]) !=0 ) return 0;
-        else return 1;
-    }
+/**
+ * @brief conduct CD function
+ * 
+ * @param commandNum the command's num in command buffer
+ * @return int error type
+ */
+int conduct_Cd(int commandNum) { 
+	int result = RESULT_NORMAL;
+
+	if (commandNum < 2) {
+		result = ERROR_MISS_PARAMETER;
+	} else if (commandNum > 2) {
+		result = ERROR_TOO_MANY_PARAMETER;
+	} else {
+		int ret = chdir(commands[1]);
+		if (ret) result = ERROR_WRONG_PARAMETER;
+	}
+	return result;
 }
 
-void conduct_pipe(char buffer[BUFFER_SIZE]){
-    int idx = 0;
-    for(; buffer[idx] != '\0'; idx++){
-        if(buffer[idx] == '|') break;
-    }
-    char outputBuffer[idx];
-    memset(outputBuffer, 0x00, idx);
-    // char inputBuffer[strlen(buffer)-idx-1];
-    char inputBuffer[strlen(buffer)-idx];
-    memset(inputBuffer, 0x00, strlen(buffer)-idx);
-    /*split the cmd into two cmd by '|'*/
-    for(int i=0; i<idx-1; i++)
-        outputBuffer[i] = buffer[i];
-    for(int i=0; i<strlen(buffer)-idx-1; i++)
-        inputBuffer[i] = buffer[idx+2+i];
-
-    /*open a pipe array*/
-    int pd[2];
-    if(pipe(pd) < 0){
-        perror("pipe error!\n");
-        exit(1);
-    }
-    /*child process conduct output, parent process conduct input*/
-    pid_t pid = fork();
-
-    if(pid == -1){
-        perror("error!\n");
-        exit(1);
-    }else if(pid == 0){// child process
-        close(pd[0]);// close the read port
-        inputParse(outputBuffer);
-        dup2(pd[1], STDOUT_FILENO);// use pd[1](write port) as std_output
-        execvp(argv[0], argv);
-        if(pd[1] != STDOUT_FILENO)
-            close(pd[1]);
-    }else{// parent process
-        /*parent process have to wait child process, since parent need child's output*/
-        int status;
-        waitpid(pid, &status, 0);      
-        int err = WEXITSTATUS(status); 
-        if (err) { 
-            printf("Error: %s\n", strerror(err));
-        }  
-
-        close(pd[1]);// close write port
-        inputParse(inputBuffer);
-        dup2(pd[0], STDIN_FILENO);// use pd[0](read port) as std_input
-        execvp(argv[0], argv);
-        if(pd[0] != STDIN_FILENO)
-            close(pd[0]);
-    }
+/**
+ * @brief help
+ * 
+ * @return int 
+ */
+int conduct_help(){
+	printf("%s\n", commands[0]);
+	system("cat help.txt");
 }
 
-void output_redirect(char buffer[BUFFER_SIZE]){
-    /*outfile*/
-    char outputFile[BUFFER_SIZE];
-    memset(outputFile, 0x00, BUFFER_SIZE);
-    /*check the format of the cmd*/
-    int num_redirect = 0;
-    for(int i=0; i+1 < strlen(buffer); i++){
-        if(buffer[i] == '>' && buffer[i+1] == ' ')
-            num_redirect++;
-    }
-    if(num_redirect != 1){
-        perror("redirect format error\n");
-        return;
-    }
+/**
+ * @brief conduct the external command
+ * conduct logic: conduct cmd ---> have pipe(conduct pipe) ---> have redirect(conduct redirect)
+ * @param commandNum 
+ * @return int : error type 
+ */
+int conduct_cmd(int commandNum) { 
+	pid_t pid = fork();
+	if (pid == -1) {
+		return ERROR_FORK;
+	} else if (pid == 0) {
+		/* deposit the STDIN and STDOUT, 
+        since we will use redirect skill in function */
+		int inFds = dup(STDIN_FILENO);
+		int outFds = dup(STDOUT_FILENO);
 
-    for(int i=0; i<argc; i++){
-        if(strcmp(command[i], ">") == 0){
-            if(i+1 < argc){
-                strcpy(outputFile, command[i+1]);
-            }else{
-                perror("without outputfile!\n");
-                return;
-            }
-        }
-    }
-    /*split the cmd by ">*/
-    int idx = 0;
-    for(; idx < strlen(buffer); idx++){
-        if(buffer[idx] == '>') break;
-    }
-    buffer[idx-1] = '\0', buffer[idx] = '\0';
-    inputParse(buffer);
-    // printf("-------------argv-------------------\n");
-    // for(int i=0; i<MAX_CMD; i++){
-    //     if(argv[i] != NULL)
-    //        printf("%s\n", argv[i]);
-    // }
-    // printf("%s\n", outputFile);
-    pid_t pid = fork();
-    if(pid == -1){
-        perror("error!\n");
-        exit(1);
-    }else if(pid == 0){// child process
-        /*open file*/
-        int fd = open(outputFile, O_WRONLY|O_CREAT|O_TRUNC, 777);
-        if(fd < 0) exit(1);
-        /*conduct cmd*/
-        dup2(fd, STDOUT_FILENO);// use fd as std_output
-        execvp(argv[0], argv);
-        if(fd != STDOUT_FILENO)
-            close(fd);
-        //if this code running, that means the execvp get error
-        printf("child process execvp run error!\n");
-        exit(1);
-    }else{// parent process
-        /*parent process have to wait child process, since parent need child's output*/
-        int status;
-        waitpid(pid, &status, 0);      
-        int err = WEXITSTATUS(status); 
-        if (err) { 
-            printf("Error: %s\n", strerror(err));
-        }  
-    }
+		int result = conduct_pipe(0, commandNum);
+		
+		/*restore stdin and stdout*/
+		dup2(inFds, STDIN_FILENO);
+		dup2(outFds, STDOUT_FILENO);
+		exit(result);
+	} else {
+		int status;
+		waitpid(pid, &status, 0);
+		return WEXITSTATUS(status);
+	}
 }
 
-void input_redirect(char buffer[BUFFER_SIZE]){
-    /*inputfile*/
-    char inputFile[BUFFER_SIZE];
-    memset(inputFile, 0x00, BUFFER_SIZE);
-    /*check the format of cmd*/
-    int num_redirect = 0;
-    for(int i=0; i+1<strlen(buffer); i++){
-        if(buffer[i] == '<' && buffer[i+1] == ' ')
-            num_redirect++;
-    }
-    if(num_redirect != 1){
-        perror("redirect format error\n");
-        return;
-    }
+/**
+ * @brief conduct the cmd that contains pipe '|'
+ * 
+ * @param left the first pieces
+ * @param right 
+ * @return int 
+ */
+int conduct_pipe(int left, int right) { 
+	if (left >= right) return RESULT_NORMAL;
+	/*check if contains '|'*/
+	int idx = -1;
+	for (int i=left; i<right; i++) {
+		if (strcmp(commands[i], COMMAND_PIPE) == 0) {
+			idx = i;
+			break;
+		}
+	}
+	if (idx == -1) { // without '|'
+		return conduct_redirect(left, right);
+	} else if (idx+1 == right) { // '|' without paraments, error
+		return ERROR_PIPE_MISS_PARAMETER;
+	}
 
-    for(int i=0; i<argc; i++){
-        if(strcmp(command[i], "<") == 0){
-            if(i+1 < argc){
-                strcpy(inputFile, command[i+1]);
-            }else{
-                perror("without inputfile!\n");
-                return;
-            }
-        }
-    }
+	/* recursive part */
+	int fd[2];
+	if (pipe(fd) == -1) {
+		return ERROR_PIPE;
+	}
+	int result = RESULT_NORMAL;
+	pid_t pid = vfork();
+	if (pid == -1) {
+		result = ERROR_FORK;
+	} else if (pid == 0) { // childProcess, conduct single cmd
+		close(fd[0]);
+		dup2(fd[1], STDOUT_FILENO); // STDOUT --> write port
+		close(fd[1]);
 
-    int idx = 0;
-    for(; idx < strlen(buffer); idx++){
-        if(buffer[idx] == '<') break;
-    }
-    buffer[idx-1] = '\0', buffer[idx] = '\0';
-    inputParse(buffer);
+		result = conduct_redirect(left, idx);
+		exit(result);
+	} else { // parentProcess, conduct recrusive part
+		int status;
+		waitpid(pid, &status, 0);
+		int exitCode = WEXITSTATUS(status);
+		
+		if (exitCode != RESULT_NORMAL) { // childProcess error in exiting
+			char info[4096] = {0};
+			char line[BUFFER_SIZE];
+			close(fd[1]);
+			dup2(fd[0], STDIN_FILENO); // STDIN --> read port
+			close(fd[0]);
 
-    pid_t pid = fork();
-    if(pid == -1){
-        perror("error!\n");
-        exit(1);
-    }else if(pid == 0){// child process
-        /*open file*/
-        int fd = open(inputFile, O_RDONLY, 7777);
-        if(fd < 0) exit(1);
-        /*conduct cmd*/
-        dup2(fd, STDIN_FILENO);// use fd as std_output
-        execvp(argv[0], argv);
-        if(fd != STDIN_FILENO)
-            close(fd);
-        //if this code running, that means the execvp get error
-        printf("child process execvp run error!\n");
-        exit(1);
-    }else{// parent process
-        /*parent process have to wait child process, since parent need child's output*/
-        int status;
-        waitpid(pid, &status, 0);      
-        int err = WEXITSTATUS(status); 
-        if (err) { 
-            printf("Error: %s\n", strerror(err));
-        }  
-    }
+			while(fgets(line, BUFFER_SIZE, stdin) != NULL)// read the error info from childProcess
+				strcat(info, line);
+			printf("%s", info); // print error info
+			result = exitCode;
+		} else if (idx+1 < right){
+			close(fd[1]);
+			dup2(fd[0], STDIN_FILENO); 
+			close(fd[0]);
+
+			result = conduct_pipe(idx+1, right); 
+		}
+	}
+	return result;
 }
+
+/**
+ * @brief conduct cmd with ">" or "<"
+ * 
+ * two symbol case:
+ * case1: grep sh < output.txt > testout (good)
+ * case2: cmd1 > cmd2 < cmd3 (X, not permit)
+ * case3: cmd1 > cmd2 > cmd3 (X, not permit)
+ * case4: cmd1 < cmd2 < cmd3 (X, not permit)
+ * 
+ * @param left 
+ * @param right 
+ * @return int 
+ */
+int conduct_redirect(int left, int right) { 
+	if (!isCommandExist(commands[left])) {
+		return ERROR_COMMAND;
+	}	
+	/* check if there are redirect actions */
+	int inNum = 0, outNum = 0;
+	char *inFile = NULL, *outFile = NULL;
+	// the "right" of the cmd that we plan to conduct, 
+	// for example, grep sh < output.txt > testout -----> grep sh (<)
+	int idx = right; 
+
+	for (int i=left; i<right; ++i) {
+		if (strcmp(commands[i], COMMAND_IN) == 0) { // input redirect
+			++inNum;
+			if (i+1 < right)
+				inFile = commands[i+1];
+			else return ERROR_MISS_PARAMETER; // without file
+
+			if (idx == right) idx = i;
+		} else if (strcmp(commands[i], COMMAND_OUT) == 0) { // output redirect
+			++outNum;
+			if (i+1 < right)
+				outFile = commands[i+1];
+			else return ERROR_MISS_PARAMETER; 
+				
+			if (idx == right) idx = i;
+		}
+	}
+	// printf("idx: %d\n", idx);
+	// printf("right: %d\n", right);
+	// printf("left: %d\n", left);
+	// return 0;
+	/* deal with the input redirect */
+	if (inNum == 1) {
+		FILE* fp = fopen(inFile, "r");
+		if (fp == NULL) // input file not exits
+			return ERROR_FILE_NOT_EXIST;
+		fclose(fp);
+	}
+	/*ensure ">" and "<" equals 1*/
+	if (inNum > 1) { 
+		return ERROR_MANY_IN;
+	} else if (outNum > 1) { 
+		return ERROR_MANY_OUT;
+	}
+
+	int result = RESULT_NORMAL;
+	pid_t pid = vfork();
+	if (pid == -1) {
+		result = ERROR_FORK;
+	} else if (pid == 0) {
+		/* redirect the stdin and stdout */
+		if (inNum == 1)
+			freopen(inFile, "r", stdin);
+		if (outNum == 1)
+			freopen(outFile, "w", stdout);
+		/* conduct cmd */
+		char* argvBuffer[BUFFER_SIZE];
+		for (int i=left; i<idx; ++i)
+			argvBuffer[i] = commands[i];
+		argvBuffer[idx] = NULL;
+		execvp(argvBuffer[left], argvBuffer+left);
+		exit(errno); // conduct error
+	} else {
+		int status;
+		waitpid(pid, &status, 0);
+		int err = WEXITSTATUS(status); 
+		if (err) {
+			printf("\e[31;1mError: %s\n\e[0m", strerror(err));
+		}
+	}
+	return result;
+}
+
